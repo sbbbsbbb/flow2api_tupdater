@@ -64,8 +64,8 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 # 创建目录
 RUN mkdir -p /app/profiles /app/logs /app/data
 
-# 权限
-RUN chmod +x /app/entrypoint.sh
+# 修复行尾符 (CRLF -> LF) 并设置权限
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # 端口
 EXPOSE 6080 5900 8002
