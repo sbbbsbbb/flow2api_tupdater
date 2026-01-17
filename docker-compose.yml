@@ -1,7 +1,9 @@
 ﻿services:
   token-updater:
-    build: .
-    image: ghcr.io/genz27/flow2api-token-updater:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tupdater:latest
     container_name: flow2api-token-updater
     ports:
       - "8002:8002"
