@@ -1,9 +1,10 @@
-﻿"""多 Profile 浏览器管理 - 完全隔离，按需启动"""
+﻿"""浏览器管理 - 轻量版，Cookie 导入模式"""
 import asyncio
+import json
 import os
 import shutil
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from playwright.async_api import async_playwright, BrowserContext, Playwright
 from .config import config
 from .database import profile_db
@@ -12,12 +13,10 @@ from .logger import logger
 
 
 class BrowserManager:
-    """浏览器管理器 - 每个 Profile 完全隔离"""
+    """浏览器管理器 - Headless 模式，Cookie 导入"""
 
     def __init__(self):
         self._playwright: Optional[Playwright] = None
-        self._active_context: Optional[BrowserContext] = None
-        self._active_profile_id: Optional[int] = None
         self._lock = asyncio.Lock()
 
     async def start(self):
@@ -27,86 +26,83 @@ class BrowserManager:
         logger.info("启动 Playwright...")
         self._playwright = await async_playwright().start()
         os.makedirs(config.profiles_dir, exist_ok=True)
-        logger.info("Playwright 已启动")
+        logger.info("Playwright 已启动 (Headless 模式)")
 
     async def stop(self):
         """停止 Playwright"""
-        await self._close_active()
         if self._playwright:
             await self._playwright.stop()
             self._playwright = None
         logger.info("Playwright 已关闭")
 
-    async def _close_active(self):
-        """关闭当前活动的浏览器"""
-        if self._active_context:
-            try:
-                await self._active_context.close()
-            except Exception:
-                pass
-            self._active_context = None
-            self._active_profile_id = None
-            logger.info("浏览器已关闭")
-
-    def _mask_token(self, token: str) -> str:
-        if not token:
-            return ""
-        if len(token) <= 8:
-            return token
-        return f"{token[:4]}...{token[-4:]}"
-
-    def _profile_dir_name(self, profile_id: int) -> str:
-        return f"profile_{profile_id}"
-
-    def _is_safe_legacy_name(self, name: str) -> bool:
-        if not name or name in {".", ".."}:
-            return False
-        if "/" in name or "\\" in name:
-            return False
-        if ".." in name:
-            return False
-        return True
-
-    def _ensure_in_base(self, base_dir: str, path: str) -> str:
-        base_dir = os.path.abspath(base_dir)
-        path = os.path.abspath(path)
-        if os.path.commonpath([base_dir, path]) != base_dir:
-            raise ValueError("Invalid profile directory")
-        return path
-
-    def _get_profile_dir(self, profile: Dict[str, Any]) -> str:
-        """获取 Profile 独立目录 (确保隔离)"""
+    def _get_profile_dir(self, profile_id: int) -> str:
+        """获取 Profile 目录"""
         base_dir = os.path.abspath(config.profiles_dir)
-        profile_id = profile.get("id")
-        if not profile_id:
-            raise ValueError("Profile ID 缺失")
+        return os.path.join(base_dir, f"profile_{profile_id}")
 
-        safe_dir = self._ensure_in_base(
-            base_dir,
-            os.path.join(base_dir, self._profile_dir_name(int(profile_id)))
+    def _get_cookie_file(self, profile_id: int) -> str:
+        """获取 Cookie 文件路径"""
+        return os.path.join(self._get_profile_dir(profile_id), "cookies.json")
+
+    async def import_cookies(self, profile_id: int, cookies: List[Dict]) -> Dict[str, Any]:
+        """导入 Cookie"""
+        profile = await profile_db.get_profile(profile_id)
+        if not profile:
+            return {"success": False, "error": "Profile 不存在"}
+
+        profile_dir = self._get_profile_dir(profile_id)
+        os.makedirs(profile_dir, exist_ok=True)
+        cookie_file = self._get_cookie_file(profile_id)
+
+        # 验证是否包含 session cookie
+        session_cookie = None
+        for cookie in cookies:
+            if cookie.get("name") == config.session_cookie_name:
+                session_cookie = cookie
+                break
+
+        if not session_cookie:
+            return {"success": False, "error": f"Cookie 中未找到 {config.session_cookie_name}"}
+
+        # 保存 cookies
+        with open(cookie_file, "w", encoding="utf-8") as f:
+            json.dump(cookies, f, ensure_ascii=False, indent=2)
+
+        # 更新 profile 状态
+        await profile_db.update_profile(
+            profile_id,
+            is_logged_in=1,
+            last_token=self._mask_token(session_cookie.get("value", "")),
+            last_token_time=datetime.now().isoformat()
         )
 
-        legacy_dir = None
-        name = profile.get("name", "")
-        if self._is_safe_legacy_name(name):
-            legacy_dir = self._ensure_in_base(base_dir, os.path.join(base_dir, name))
+        logger.info(f"[{profile['name']}] Cookie 导入成功")
+        return {"success": True, "message": "Cookie 导入成功"}
 
-        if legacy_dir and os.path.isdir(legacy_dir) and not os.path.exists(safe_dir):
-            try:
-                shutil.move(legacy_dir, safe_dir)
-                logger.info(f"[{profile['name']}] 迁移目录: {legacy_dir} -> {safe_dir}")
-            except Exception as exc:
-                logger.warning(f"[{profile['name']}] 迁移目录失败: {exc}")
+    async def export_cookies(self, profile_id: int) -> Dict[str, Any]:
+        """导出 Cookie"""
+        profile = await profile_db.get_profile(profile_id)
+        if not profile:
+            return {"success": False, "error": "Profile 不存在"}
 
-        return safe_dir
+        cookie_file = self._get_cookie_file(profile_id)
+        if not os.path.exists(cookie_file):
+            return {"success": False, "error": "无 Cookie 数据"}
+
+        with open(cookie_file, "r", encoding="utf-8") as f:
+            cookies = json.load(f)
+
+        return {"success": True, "cookies": cookies}
+
+    def _mask_token(self, token: str) -> str:
+        if not token or len(token) <= 8:
+            return token or ""
+        return f"{token[:4]}...{token[-4:]}"
 
     async def _launch_context(self, profile: Dict[str, Any]) -> BrowserContext:
-        """启动完全隔离的浏览器上下文"""
+        """启动 Headless 浏览器上下文"""
         if not self._playwright:
             await self.start()
-
-        profile_dir = self._get_profile_dir(profile)
-        os.makedirs(profile_dir, exist_ok=True)
 
         # 解析代理配置
         proxy = None
@@ -116,142 +112,115 @@ class BrowserManager:
                 proxy = format_proxy_for_playwright(proxy_config)
                 logger.info(f"[{profile['name']}] 使用代理: {proxy['server']}")
 
-        # 启动持久化上下文 - 每个 profile 完全独立
-        # user_data_dir 确保 cookies/storage 隔离
-        context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=profile_dir,  # 独立数据目录 = 完全隔离
-            headless=config.headless,
+        # 启动 Headless 浏览器
+        browser = await self._playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--single-process",
+            ]
+        )
+
+        context = await browser.new_context(
             viewport={"width": 1280, "height": 720},
             locale="en-US",
             timezone_id="America/New_York",
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             proxy=proxy,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                "--window-size=1280,720",
-            ],
-            ignore_default_args=["--enable-automation"],
         )
 
-        logger.info(f"[{profile['name']}] 浏览器已启动 (隔离目录: {profile_dir})")
+        # 加载已保存的 cookies
+        cookie_file = self._get_cookie_file(profile["id"])
+        if os.path.exists(cookie_file):
+            with open(cookie_file, "r", encoding="utf-8") as f:
+                cookies = json.load(f)
+            await context.add_cookies(cookies)
+            logger.info(f"[{profile['name']}] 已加载 {len(cookies)} 个 Cookie")
+
         return context
 
-    async def launch_for_login(self, profile_id: int) -> bool:
-        """启动浏览器用于登录"""
-        async with self._lock:
-            await self._close_active()
-
-            profile = await profile_db.get_profile(profile_id)
-            if not profile:
-                logger.error(f"Profile {profile_id} 不存在")
-                return False
-
-            try:
-                self._active_context = await self._launch_context(profile)
-                self._active_profile_id = profile_id
-
-                page = self._active_context.pages[0] if self._active_context.pages else await self._active_context.new_page()
-                await page.goto(config.login_url, wait_until="networkidle")
-
-                logger.info(f"[{profile['name']}] 请通过 VNC 登录")
-                return True
-            except Exception as exc:
-                logger.error(f"[{profile['name']}] 启动失败: {exc}")
-                return False
-
-    async def close_browser(self, profile_id: int):
-        """关闭浏览器 (关闭前检查登录状态)"""
-        async with self._lock:
-            if self._active_profile_id == profile_id and self._active_context:
-                # 关闭前检查登录状态
-                try:
-                    cookies = await self._active_context.cookies("https://labs.google")
-                    is_logged_in = any(c["name"] == config.session_cookie_name for c in cookies)
-                    await profile_db.update_profile(profile_id, is_logged_in=int(is_logged_in))
-                    if is_logged_in:
-                        logger.info(f"Profile {profile_id} 登录状态已保存")
-                except Exception:
-                    pass
-
-                await self._close_active()
-
     async def extract_token(self, profile_id: int) -> Optional[str]:
-        """提取 token (优先使用当前运行的浏览器)"""
+        """提取 Token"""
         async with self._lock:
             profile = await profile_db.get_profile(profile_id)
             if not profile:
                 return None
 
-            # 如果当前 profile 的浏览器正在运行，直接从中提取
-            if self._active_profile_id == profile_id and self._active_context:
-                logger.info(f"[{profile['name']}] 从运行中的浏览器提取 Token...")
-                try:
-                    # 确保页面已加载
-                    page = self._active_context.pages[0] if self._active_context.pages else await self._active_context.new_page()
-                    current_url = page.url
+            # 检查是否有 cookie 文件
+            cookie_file = self._get_cookie_file(profile_id)
+            if not os.path.exists(cookie_file):
+                logger.warning(f"[{profile['name']}] 无 Cookie 文件，请先导入")
+                return None
 
-                    # 如果不在 labs.google 域名下，先导航过去
-                    if "labs.google" not in current_url:
-                        await page.goto(config.labs_url, wait_until="networkidle")
-                        await asyncio.sleep(2)
-
-                    cookies = await self._active_context.cookies("https://labs.google")
-                    token = None
-                    for cookie in cookies:
-                        if cookie["name"] == config.session_cookie_name:
-                            token = cookie["value"]
-                            break
-
-                    if token:
-                        logger.info(f"[{profile['name']}] Token 提取成功 (从运行中浏览器)")
-                        await profile_db.update_profile(
-                            profile_id,
-                            is_logged_in=1,
-                            last_token=self._mask_token(token),
-                            last_token_time=datetime.now().isoformat()
-                        )
-                    else:
-                        logger.warning(f"[{profile['name']}] 未找到 Token (运行中浏览器)")
-                        await profile_db.update_profile(profile_id, is_logged_in=0)
-
-                    return token
-                except Exception as exc:
-                    logger.error(f"[{profile['name']}] 从运行中浏览器提取失败: {exc}")
-                    # 继续尝试启动新浏览器
-
-            # 否则启动新浏览器提取
             context = None
+            browser = None
             try:
                 logger.info(f"[{profile['name']}] 启动浏览器提取 Token...")
-                context = await self._launch_context(profile)
+                
+                if not self._playwright:
+                    await self.start()
 
-                page = context.pages[0] if context.pages else await context.new_page()
-                await page.goto(config.labs_url, wait_until="networkidle")
-                await asyncio.sleep(3)
+                # 解析代理
+                proxy = None
+                if profile.get("proxy_enabled") and profile.get("proxy_url"):
+                    proxy_config = parse_proxy(profile["proxy_url"])
+                    if proxy_config:
+                        proxy = format_proxy_for_playwright(proxy_config)
 
-                # 只获取该 context 的 cookies (隔离)
-                cookies = await context.cookies("https://labs.google")
+                browser = await self._playwright.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox", 
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                    ]
+                )
+
+                context = await browser.new_context(
+                    viewport={"width": 1280, "height": 720},
+                    locale="en-US",
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    proxy=proxy,
+                )
+
+                # 加载 cookies
+                with open(cookie_file, "r", encoding="utf-8") as f:
+                    cookies = json.load(f)
+                await context.add_cookies(cookies)
+
+                # 访问页面刷新 token
+                page = await context.new_page()
+                await page.goto(config.labs_url, wait_until="networkidle", timeout=30000)
+                await asyncio.sleep(2)
+
+                # 提取新 cookies
+                new_cookies = await context.cookies("https://labs.google")
                 token = None
-                for cookie in cookies:
+                for cookie in new_cookies:
                     if cookie["name"] == config.session_cookie_name:
                         token = cookie["value"]
                         break
 
                 if token:
-                    logger.info(f"[{profile['name']}] Token 提取成功")
+                    # 保存更新后的 cookies
+                    all_cookies = await context.cookies()
+                    with open(cookie_file, "w", encoding="utf-8") as f:
+                        json.dump(all_cookies, f, ensure_ascii=False, indent=2)
+
                     await profile_db.update_profile(
                         profile_id,
                         is_logged_in=1,
                         last_token=self._mask_token(token),
                         last_token_time=datetime.now().isoformat()
                     )
+                    logger.info(f"[{profile['name']}] Token 提取成功")
                 else:
-                    logger.warning(f"[{profile['name']}] 未找到 Token")
                     await profile_db.update_profile(profile_id, is_logged_in=0)
+                    logger.warning(f"[{profile['name']}] Token 已失效，请重新导入 Cookie")
 
                 return token
 
@@ -261,56 +230,32 @@ class BrowserManager:
             finally:
                 if context:
                     await context.close()
-                    logger.info(f"[{profile['name']}] 浏览器已关闭")
+                if browser:
+                    await browser.close()
 
-    async def verify_isolation(self, profile_id: int) -> Dict[str, Any]:
-        """验证 Profile 隔离性"""
+    async def verify_cookies(self, profile_id: int) -> Dict[str, Any]:
+        """验证 Cookie 是否有效"""
         profile = await profile_db.get_profile(profile_id)
         if not profile:
             return {"success": False, "error": "Profile 不存在"}
 
-        profile_dir = self._get_profile_dir(profile)
-
-        # 检查目录是否独立存在
-        dir_exists = os.path.exists(profile_dir)
-
-        # 检查是否有其他 profile 共享目录
-        all_profiles = await profile_db.get_all_profiles()
-        shared_with = []
-        for p in all_profiles:
-            if p["id"] != profile_id:
-                other_dir = self._get_profile_dir(p)
-                if other_dir == profile_dir:
-                    shared_with.append(p["name"])
-
-        is_isolated = dir_exists and len(shared_with) == 0
-
-        return {
-            "success": True,
-            "profile_name": profile["name"],
-            "profile_dir": profile_dir,
-            "dir_exists": dir_exists,
-            "is_isolated": is_isolated,
-            "shared_with": shared_with
-        }
+        token = await self.extract_token(profile_id)
+        if token:
+            return {"success": True, "valid": True, "message": "Cookie 有效"}
+        else:
+            return {"success": True, "valid": False, "message": "Cookie 已失效，请重新导入"}
 
     async def delete_profile_data(self, profile_id: int):
         """删除 profile 数据目录"""
-        profile = await profile_db.get_profile(profile_id)
-        if profile:
-            profile_dir = self._get_profile_dir(profile)
-            if os.path.exists(profile_dir):
-                shutil.rmtree(profile_dir)
-                logger.info(f"已删除: {profile_dir}")
-
-    def get_active_profile_id(self) -> Optional[int]:
-        return self._active_profile_id
+        profile_dir = self._get_profile_dir(profile_id)
+        if os.path.exists(profile_dir):
+            shutil.rmtree(profile_dir)
+            logger.info(f"已删除: {profile_dir}")
 
     def get_status(self) -> Dict[str, Any]:
         return {
             "is_running": self._playwright is not None,
-            "active_profile_id": self._active_profile_id,
-            "has_active_browser": self._active_context is not None,
+            "mode": "headless",
             "profiles_dir": config.profiles_dir
         }
 

@@ -1,37 +1,21 @@
-﻿services:
+﻿version: '3.8'
+
+services:
   token-updater:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: tupdater:latest
+    build: .
     container_name: flow2api-token-updater
+    restart: unless-stopped
     ports:
       - "8002:8002"
-      - "6080:6080"
-      - "127.0.0.1:5900:5900"
     volumes:
-      - ./profiles:/app/profiles
       - ./data:/app/data
+      - ./profiles:/app/profiles
       - ./logs:/app/logs
     environment:
-      # 管理员密码 (Web UI)
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
-      # API 端口
-      - API_PORT=8002
-      # 外部 API Key (供其他服务调用)
       - API_KEY=${API_KEY:-}
-      # Flow2API 配置
       - FLOW2API_URL=${FLOW2API_URL:-http://host.docker.internal:8000}
       - CONNECTION_TOKEN=${CONNECTION_TOKEN:-}
       - REFRESH_INTERVAL=${REFRESH_INTERVAL:-60}
-      # 会话与 CORS
-      - SESSION_TTL_MINUTES=${SESSION_TTL_MINUTES:-1440}
-      - CORS_ORIGINS=${CORS_ORIGINS:-}
-      - CORS_ALLOW_CREDENTIALS=${CORS_ALLOW_CREDENTIALS:-false}
-      - CONFIG_FILE=${CONFIG_FILE:-/app/data/config.json}
-      # VNC
-      - VNC_PASSWORD=${VNC_PASSWORD:-flow2api}
-      - RESOLUTION=1280x720x24
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    restart: unless-stopped

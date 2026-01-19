@@ -1,4 +1,4 @@
-﻿"""Token Updater 配置"""
+﻿"""Token Updater 配置 v3.0"""
 import json
 import os
 from pydantic import BaseModel
@@ -68,7 +68,7 @@ class Config(BaseModel):
     # 管理员密码 (Web UI)
     admin_password: str
 
-    # 外部 API Key (供其他服务调用)
+    # 外部 API Key
     api_key: str
 
     # Flow2API 服务器配置
@@ -78,13 +78,11 @@ class Config(BaseModel):
     # 刷新间隔 (分钟)
     refresh_interval: int
 
-    # 浏览器配置
-    profiles_dir: str = "/app/profiles"  # 多 profile 目录
-    headless: bool  # VNC 模式下必须为 False
+    # Profile 目录
+    profiles_dir: str = "/app/profiles"
 
     # Google Labs URL
-    labs_url: str = "https://labs.google/fx/tools/flow"  # 提取 token 用
-    login_url: str = "https://labs.google/fx/api/auth/signin/google"  # 登录用
+    labs_url: str = "https://labs.google/fx/tools/flow"
 
     # Cookie 名称
     session_cookie_name: str = "__Secure-next-auth.session-token"
@@ -95,7 +93,7 @@ class Config(BaseModel):
     # 数据库路径
     db_path: str = "/app/data/profiles.db"
 
-    # 会话 TTL (分钟)，0 表示不自动过期
+    # 会话 TTL (分钟)
     session_ttl_minutes: int
 
     # CORS 配置
@@ -134,7 +132,6 @@ def _build_config() -> Config:
         flow2api_url=flow2api_url,
         connection_token=connection_token,
         refresh_interval=refresh_interval,
-        headless=_parse_bool(_get_env("HEADLESS"), default=False),
         api_port=_parse_int(_get_env("API_PORT"), 8002),
         session_ttl_minutes=_parse_int(_get_env("SESSION_TTL_MINUTES"), 1440),
         cors_origins=_parse_origins(_get_env("CORS_ORIGINS")),

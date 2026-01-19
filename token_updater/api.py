@@ -1,20 +1,21 @@
-﻿"""Token Updater API - 含外部 API"""
+﻿"""Token Updater API v3.0 - 轻量版"""
 import secrets
 import time
 from apscheduler.triggers.interval import IntervalTrigger
-from fastapi import FastAPI, HTTPException, Depends, Header, Request
+from fastapi import FastAPI, HTTPException, Depends, Header, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from .browser import browser_manager
 from .updater import token_syncer
 from .database import profile_db
 from .proxy_utils import validate_proxy_format
 from .config import config
 from .logger import logger
+import json
 
-app = FastAPI(title="Flow2API Token Updater", version="2.1.0")
+app = FastAPI(title="Flow2API Token Updater", version="3.0.0")
 
 cors_origins = config.cors_origins
 cors_allow_credentials = config.cors_allow_credentials
@@ -23,7 +24,7 @@ if "*" in cors_origins and cors_allow_credentials:
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,
+    allow_origins=cors_origins if cors_origins else ["*"],
     allow_credentials=cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -100,6 +101,9 @@ class UpdateConfigRequest(BaseModel):
     flow2api_url: Optional[str] = None
     connection_token: Optional[str] = None
     refresh_interval: Optional[int] = None
+
+class ImportCookiesRequest(BaseModel):
+    cookies: List[dict]
 
 
 # ========== Auth ==========
@@ -179,7 +183,9 @@ async def get_status(token: str = Depends(verify_session)):
             "refresh_interval": config.refresh_interval,
             "has_connection_token": bool(config.connection_token),
             "has_api_key": bool(config.api_key)
-        }
+        },
+        "version": "3.0.0",
+        "mode": "cookie-import"
     }
 
 
@@ -188,28 +194,11 @@ async def get_status(token: str = Depends(verify_session)):
 @app.get("/api/profiles")
 async def get_profiles(token: str = Depends(verify_session)):
     profiles = await profile_db.get_all_profiles()
-    active_id = browser_manager.get_active_profile_id()
-
     for p in profiles:
-        p["is_browser_active"] = (p["id"] == active_id)
-
-        # 如果浏览器正在运行，实时检测登录状态
-        if p["id"] == active_id and browser_manager._active_context:
-            try:
-                cookies = await browser_manager._active_context.cookies("https://labs.google")
-                is_logged_in = any(c["name"] == config.session_cookie_name for c in cookies)
-                if is_logged_in != bool(p.get("is_logged_in")):
-                    await profile_db.update_profile(p["id"], is_logged_in=int(is_logged_in))
-                    p["is_logged_in"] = int(is_logged_in)
-            except Exception:
-                pass
-
-        # 验证代理格式
         if p.get("proxy_url"):
             valid, msg = validate_proxy_format(p["proxy_url"])
             p["proxy_status"] = msg
             p["proxy_valid"] = bool(valid)
-
     return profiles
 
 
@@ -231,7 +220,6 @@ async def get_profile(profile_id: int, token: str = Depends(verify_session)):
     profile = await profile_db.get_profile(profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="不存在")
-    profile["is_browser_active"] = (profile_id == browser_manager.get_active_profile_id())
     return profile
 
 
@@ -268,7 +256,6 @@ async def delete_profile(profile_id: int, token: str = Depends(verify_session)):
     if not profile:
         raise HTTPException(status_code=404, detail="不存在")
 
-    await browser_manager.close_browser(profile_id)
     await browser_manager.delete_profile_data(profile_id)
     await profile_db.delete_profile(profile_id)
     return {"success": True}
@@ -286,68 +273,61 @@ async def disable_profile(profile_id: int, token: str = Depends(verify_session))
     return {"success": True}
 
 
-@app.get("/api/profiles/{profile_id}/isolation")
-async def check_isolation(profile_id: int, token: str = Depends(verify_session)):
-    """检查 Profile 隔离状态"""
-    return await browser_manager.verify_isolation(profile_id)
+# ========== Cookie 管理 ==========
+
+@app.post("/api/profiles/{profile_id}/cookies")
+async def import_cookies(profile_id: int, request: ImportCookiesRequest, token: str = Depends(verify_session)):
+    """导入 Cookie (JSON 格式)"""
+    result = await browser_manager.import_cookies(profile_id, request.cookies)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
-# ========== Browser ==========
-
-@app.post("/api/profiles/{profile_id}/launch")
-async def launch_browser(profile_id: int, token: str = Depends(verify_session)):
-    success = await browser_manager.launch_for_login(profile_id)
-    if not success:
-        raise HTTPException(status_code=500, detail="启动失败")
-    return {"success": True, "message": "请通过 VNC 登录"}
-
-
-@app.post("/api/profiles/{profile_id}/close")
-async def close_browser(profile_id: int, token: str = Depends(verify_session)):
-    await browser_manager.close_browser(profile_id)
-    return {"success": True}
-
-
-@app.post("/api/profiles/{profile_id}/check-login")
-async def check_login_status(profile_id: int, token: str = Depends(verify_session)):
-    """检查并更新登录状态"""
-    profile = await profile_db.get_profile(profile_id)
-    if not profile:
-        raise HTTPException(status_code=404, detail="不存在")
-
-    # 如果浏览器正在运行，从当前 context 检查
-    if browser_manager.get_active_profile_id() == profile_id and browser_manager._active_context:
-        try:
-            cookies = await browser_manager._active_context.cookies("https://labs.google")
-            is_logged_in = any(c["name"] == config.session_cookie_name for c in cookies)
-            await profile_db.update_profile(profile_id, is_logged_in=int(is_logged_in))
-            return {"success": True, "is_logged_in": is_logged_in, "source": "active_browser"}
-        except Exception:
-            pass
-
-    # 否则启动浏览器快速检查
-    token_found = await browser_manager.extract_token(profile_id)
-    is_logged_in = token_found is not None
-
-    return {"success": True, "is_logged_in": is_logged_in, "source": "extracted"}
+@app.post("/api/profiles/{profile_id}/cookies/upload")
+async def upload_cookies(profile_id: int, file: UploadFile = File(...), token: str = Depends(verify_session)):
+    """上传 Cookie 文件"""
+    try:
+        content = await file.read()
+        cookies = json.loads(content.decode("utf-8"))
+        
+        # 支持多种格式
+        if isinstance(cookies, dict) and "cookies" in cookies:
+            cookies = cookies["cookies"]
+        if not isinstance(cookies, list):
+            raise HTTPException(status_code=400, detail="Cookie 格式错误，需要数组格式")
+            
+        result = await browser_manager.import_cookies(profile_id, cookies)
+        if not result["success"]:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return result
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="JSON 解析失败")
 
 
-@app.post("/api/profiles/{profile_id}/login")
-async def open_login_page(profile_id: int, token: str = Depends(verify_session)):
-    success = await browser_manager.launch_for_login(profile_id)
-    if not success:
-        raise HTTPException(status_code=500, detail="启动失败")
-    return {"success": True, "message": "请通过 VNC 登录"}
+@app.get("/api/profiles/{profile_id}/cookies")
+async def export_cookies(profile_id: int, token: str = Depends(verify_session)):
+    """导出 Cookie"""
+    result = await browser_manager.export_cookies(profile_id)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
-# ========== Token (Web UI) ==========
+@app.post("/api/profiles/{profile_id}/cookies/verify")
+async def verify_cookies(profile_id: int, token: str = Depends(verify_session)):
+    """验证 Cookie 是否有效"""
+    return await browser_manager.verify_cookies(profile_id)
+
+
+# ========== Token ==========
 
 @app.post("/api/profiles/{profile_id}/extract")
 async def extract_token(profile_id: int, token: str = Depends(verify_session)):
     extracted = await browser_manager.extract_token(profile_id)
     if extracted:
         return {"success": True, "token_length": len(extracted)}
-    return {"success": False, "message": "未找到 Token"}
+    return {"success": False, "message": "未找到 Token，请导入有效 Cookie"}
 
 
 @app.post("/api/profiles/{profile_id}/sync")
@@ -409,7 +389,7 @@ async def update_config(request: UpdateConfigRequest, api_request: Request, toke
     return {"success": True}
 
 
-# ========== 外部 API (需要 API Key) ==========
+# ========== 外部 API ==========
 
 @app.get("/v1/profiles")
 async def ext_list_profiles(api_key: str = Depends(verify_api_key)):
@@ -431,11 +411,7 @@ async def ext_list_profiles(api_key: str = Depends(verify_api_key)):
 
 @app.get("/v1/profiles/{profile_id}/token")
 async def ext_get_token(profile_id: int, api_key: str = Depends(verify_api_key)):
-    """
-    外部 API: 获取指定 Profile 的 Session Token
-
-    会启动浏览器提取最新 token，然后返回
-    """
+    """外部 API: 获取 Token"""
     profile = await profile_db.get_profile(profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -443,13 +419,9 @@ async def ext_get_token(profile_id: int, api_key: str = Depends(verify_api_key))
     if not profile.get("is_active"):
         raise HTTPException(status_code=400, detail="Profile is disabled")
 
-    logger.info(f"[API] 请求 Profile {profile['name']} 的 Token")
-
-    # 提取 token
     token_value = await browser_manager.extract_token(profile_id)
-
     if not token_value:
-        raise HTTPException(status_code=400, detail="Failed to extract token, please login first")
+        raise HTTPException(status_code=400, detail="Failed to extract token, please import cookies first")
 
     return {
         "success": True,
@@ -462,12 +434,10 @@ async def ext_get_token(profile_id: int, api_key: str = Depends(verify_api_key))
 
 @app.post("/v1/profiles/{profile_id}/sync")
 async def ext_sync_profile(profile_id: int, api_key: str = Depends(verify_api_key)):
-    """外部 API: 同步指定 Profile 到 Flow2API"""
+    """外部 API: 同步 Profile"""
     profile = await profile_db.get_profile(profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
-
-    logger.info(f"[API] 同步 Profile {profile['name']}")
     return await token_syncer.sync_profile(profile_id)
 
 
@@ -477,19 +447,6 @@ async def ext_get_token_by_name(name: str, api_key: str = Depends(verify_api_key
     profile = await profile_db.get_profile_by_name(name)
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
-
-    return await ext_get_token(profile["id"], api_key)
-
-
-@app.get("/v1/profiles/by-email/{email}/token")
-async def ext_get_token_by_email(email: str, api_key: str = Depends(verify_api_key)):
-    """外部 API: 通过邮箱获取 Token"""
-    profiles = await profile_db.get_all_profiles()
-    profile = next((p for p in profiles if p.get("email") == email), None)
-
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found")
-
     return await ext_get_token(profile["id"], api_key)
 
 
@@ -497,4 +454,4 @@ async def ext_get_token_by_email(email: str, api_key: str = Depends(verify_api_k
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": "3.0.0"}

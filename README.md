@@ -1,101 +1,68 @@
-﻿# Flow2API Token Updater v2.0
+﻿# Flow2API Token Updater v3.0
 
-多 Profile 管理版 - Docker + noVNC + Playwright
+轻量版 Token 自动更新工具，通过 Cookie 导入方式管理 Google Labs 登录状态。
 
 ## 特性
 
-- 🖥️ **Web 管理界面** - 可视化管理多个 Google 账号
-- 🔐 **密码保护** - 管理界面和 VNC 都需要密码
-- 👥 **多 Profile 支持** - 每个账号独立浏览器 profile
-- 🔄 **持久化登录** - 重启不丢失登录状态
-- ⏰ **定时自动同步** - 批量提取并推送 Token
+- 🪶 轻量化：去除 VNC，镜像体积大幅减小
+- 🍪 Cookie 导入：在本地浏览器登录后导出 Cookie
+- 🔄 自动刷新：定时使用 Cookie 刷新 Token
+- 👥 多 Profile：支持管理多个账号
+- 🌐 代理支持：每个 Profile 可配置独立代理
 
-## 一键部署
-
-```bash
-git clone https://github.com/genz27/flow2api_tupdater.git && cd flow2api_tupdater && docker compose up -d --build
-```
-
-部署后访问: `http://你的IP:8002`
-
-## 更新升级
+## 快速开始
 
 ```bash
-cd flow2api_tupdater && git pull && docker compose down && docker compose build --no-cache && docker compose up -d
+# 克隆仓库
+git clone https://github.com/genz27/flow2api_tupdater.git
+cd flow2api_tupdater
+
+# 配置环境变量
+cp .env.example .env
+# 编辑 .env 设置 ADMIN_PASSWORD 等
+
+# 启动
+docker-compose up -d
 ```
 
-## 密码配置
-
-| 服务 | 环境变量 | 默认值 | 说明 |
-|------|----------|--------|------|
-| 管理界面 | `ADMIN_PASSWORD` | `admin123` | Web 管理界面登录密码 |
-| VNC | `VNC_PASSWORD` | `flow2api` | noVNC 远程桌面密码 |
-| 外部 API | `API_KEY` | 空 | 调用 `/v1/*` 接口的 API Key |
-
-修改密码：编辑 `.env` 文件或 `docker-compose.yml`
-
-```bash
-# 创建 .env 文件
-cat > .env << EOF
-ADMIN_PASSWORD=你的强密码
-VNC_PASSWORD=你的VNC密码
-FLOW2API_URL=http://你的Flow2API地址:8000
-CONNECTION_TOKEN=从Flow2API后台获取
-EOF
-```
-
-## 端口说明
-
-| 端口 | 用途 |
-|------|------|
-| 8002 | Web 管理界面 |
-| 6080 | noVNC 远程桌面 |
-| 5900 | VNC 端口 (默认仅本机绑定，需手动放开) |
-
-> 如需暴露 5900，请修改 `docker-compose.yml` 的端口映射。
+访问 http://localhost:8002 进入管理界面。
 
 ## 使用流程
 
-1. 访问 `http://你的IP:8002` 登录管理界面
-2. 点击「新建 Profile」创建账号
-3. 点击「登录」按钮，在 VNC 中完成 Google 登录
-4. 点击「同步」将 Token 推送到 Flow2API
+1. 创建 Profile
+2. 在本地浏览器登录 https://labs.google
+3. 使用浏览器插件（如 EditThisCookie）导出 Cookie
+4. 在管理界面导入 Cookie
+5. 配置 Flow2API 连接信息
+6. 开始自动同步
 
-## API 接口
+## 环境变量
 
-```bash
-# 登录
-POST /api/login {"password": "xxx"}
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| ADMIN_PASSWORD | 管理界面密码 | admin123 |
+| API_KEY | 外部 API 密钥 | - |
+| FLOW2API_URL | Flow2API 地址 | http://host.docker.internal:8000 |
+| CONNECTION_TOKEN | Flow2API 连接 Token | - |
+| REFRESH_INTERVAL | 刷新间隔(分钟) | 60 |
 
-# Profile 管理
-GET    /api/profiles
-POST   /api/profiles {"name": "account1"}
-DELETE /api/profiles/{id}
+## API
 
-# 操作
-POST /api/profiles/{id}/launch  # 启动浏览器
-POST /api/profiles/{id}/login   # 打开登录页
-POST /api/profiles/{id}/sync    # 同步 Token
-POST /api/sync-all              # 同步全部
-```
+### 外部 API (需要 X-API-Key)
 
-## 配置持久化
+- `GET /v1/profiles` - 列出所有 Profile
+- `GET /v1/profiles/{id}/token` - 获取 Token
+- `POST /v1/profiles/{id}/sync` - 同步到 Flow2API
 
-Web UI 修改的 `FLOW2API_URL`、`CONNECTION_TOKEN`、`REFRESH_INTERVAL` 会写入 `CONFIG_FILE` (默认 `/app/data/config.json`) 并在重启后加载。
+## 从 v2.0 升级
 
-## 目录结构
+v3.0 移除了 VNC 功能，改用 Cookie 导入方式：
 
-```
-docker-vnc/
-├── profiles/     # 浏览器数据 (持久化)
-├── data/         # SQLite 数据库 + config.json
-├── logs/         # 日志
-└── docker-compose.yml
-```
+1. 备份 `data/` 目录
+2. 拉取新版本
+3. 重新构建镜像
+4. 为每个 Profile 重新导入 Cookie
 
-## 安全建议
+## License
 
-1. 修改默认密码 `ADMIN_PASSWORD` 和 `VNC_PASSWORD`
-2. 使用防火墙限制 6080/8002 端口访问
-3. 建议配合 Nginx 反向代理 + HTTPS
-4. 若不使用外部 API，保持 `API_KEY` 为空并避免暴露 `/v1/*`
+MIT
