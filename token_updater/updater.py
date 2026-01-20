@@ -1,7 +1,7 @@
 """Token 同步服务 - 按需启动浏览器"""
 import httpx
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from .config import config
 from .browser import browser_manager
 from .database import profile_db
@@ -15,6 +15,53 @@ class TokenSyncer:
         self._total_sync_count = 0
         self._total_error_count = 0
         self._last_batch_time: Optional[datetime] = None
+    
+    async def _check_tokens_status(self, emails: List[str] = None) -> Dict[str, Any]:
+        """从 Flow2API 查询 token 状态
+        
+        Returns:
+            {
+                "success": True,
+                "tokens": [...],
+                "needs_refresh_emails": ["email1", "email2"]
+            }
+        """
+        if not config.connection_token:
+            return {"success": False, "error": "未配置 CONNECTION_TOKEN"}
+        
+        url = f"{config.flow2api_url}/api/plugin/check-tokens"
+        
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                payload = {}
+                if emails:
+                    payload["emails"] = emails
+                
+                response = await client.post(
+                    url,
+                    json=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {config.connection_token}"
+                    }
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    tokens = data.get("tokens", [])
+                    needs_refresh_emails = [
+                        t["email"] for t in tokens 
+                        if t.get("needs_refresh") and t.get("is_active")
+                    ]
+                    return {
+                        "success": True,
+                        "tokens": tokens,
+                        "needs_refresh_emails": needs_refresh_emails
+                    }
+                else:
+                    return {"success": False, "error": f"HTTP {response.status_code}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
     
     async def sync_profile(self, profile_id: int) -> Dict[str, Any]:
         """同步单个 profile"""
@@ -36,6 +83,9 @@ class TokenSyncer:
             )
             self._total_error_count += 1
             return {"success": False, "error": "无法提取 Token，请先登录"}
+        
+        # Log token for debugging
+        logger.info(f"[{profile['name']}] 提取到 Token: {token[:20]}...{token[-10:]}")
         
         # 推送到 Flow2API
         result = await self._push_to_flow2api(token)
@@ -63,14 +113,81 @@ class TokenSyncer:
         return result
     
     async def sync_all_profiles(self) -> Dict[str, Any]:
-        """同步所有活跃 profile"""
+        """同步所有活跃 profile（智能模式：只刷新快过期的）"""
         if not config.connection_token:
             return {"success": False, "error": "未配置 CONNECTION_TOKEN"}
         
         logger.info("=" * 40)
-        logger.info("开始批量同步...")
+        logger.info("开始智能同步...")
         
         self._last_batch_time = datetime.now()
+        profiles = await profile_db.get_active_profiles()
+        
+        if not profiles:
+            logger.info("没有活跃的 Profile")
+            return {"success": True, "total": 0, "synced": 0, "skipped": 0}
+        
+        # 获取所有 profile 的 email
+        profile_emails = {p.get("email"): p for p in profiles if p.get("email")}
+        
+        # 查询 Flow2API 哪些 token 需要刷新
+        check_result = await self._check_tokens_status(list(profile_emails.keys()))
+        
+        if not check_result["success"]:
+            logger.warning(f"无法查询 token 状态: {check_result.get('error')}，回退到全量同步")
+            # 回退到全量同步
+            return await self._sync_all_profiles_force()
+        
+        needs_refresh_emails = set(check_result.get("needs_refresh_emails", []))
+        
+        if not needs_refresh_emails:
+            logger.info("所有 token 状态良好，无需刷新")
+            return {
+                "success": True,
+                "total": len(profiles),
+                "synced": 0,
+                "skipped": len(profiles),
+                "message": "所有 token 未过期"
+            }
+        
+        logger.info(f"需要刷新的 token: {len(needs_refresh_emails)} 个")
+        
+        results = []
+        success_count = 0
+        error_count = 0
+        skipped_count = 0
+        
+        for profile in profiles:
+            email = profile.get("email")
+            if email and email in needs_refresh_emails:
+                result = await self.sync_profile(profile["id"])
+                results.append({
+                    "profile_id": profile["id"],
+                    "profile_name": profile["name"],
+                    **result
+                })
+                if result["success"]:
+                    success_count += 1
+                else:
+                    error_count += 1
+            else:
+                skipped_count += 1
+                logger.info(f"[{profile['name']}] token 未过期，跳过")
+        
+        logger.info(f"智能同步完成: 成功 {success_count}, 失败 {error_count}, 跳过 {skipped_count}")
+        
+        return {
+            "success": True,
+            "total": len(profiles),
+            "synced": success_count + error_count,
+            "success_count": success_count,
+            "error_count": error_count,
+            "skipped": skipped_count,
+            "results": results
+        }
+    
+    async def _sync_all_profiles_force(self) -> Dict[str, Any]:
+        """强制同步所有 profile（不检查过期状态）"""
         profiles = await profile_db.get_active_profiles()
         
         results = []
@@ -89,7 +206,7 @@ class TokenSyncer:
             else:
                 error_count += 1
         
-        logger.info(f"批量同步完成: 成功 {success_count}, 失败 {error_count}")
+        logger.info(f"强制同步完成: 成功 {success_count}, 失败 {error_count}")
         
         return {
             "success": True,

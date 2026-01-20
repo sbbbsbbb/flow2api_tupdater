@@ -228,9 +228,18 @@ class BrowserManager:
         try:
             page = context.pages[0] if context.pages else await context.new_page()
 
-            # 访问页面刷新会话
-            await page.goto(config.labs_url, wait_until="networkidle", timeout=30000)
-            await asyncio.sleep(2)
+            # 访问页面触发 session 刷新
+            logger.info(f"[{profile['name']}] 访问 {config.labs_url} 刷新 session...")
+            await page.goto(config.labs_url, wait_until="networkidle", timeout=60000)
+            
+            # 等待页面完全加载，确保 cookie 已更新
+            await asyncio.sleep(3)
+            
+            # 再次等待网络空闲，确保所有认证请求完成
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
 
             # 提取 cookie
             cookies = await context.cookies("https://labs.google")
