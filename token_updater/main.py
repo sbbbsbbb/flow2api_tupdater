@@ -1,8 +1,9 @@
-﻿"""Token Updater 主入口 v3.0 - 轻量版"""
-import asyncio
+"""Token Updater entrypoint v3.3 (lightweight)."""
+
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+
 from .api import app
 from .browser import browser_manager
 from .updater import token_syncer
@@ -19,35 +20,31 @@ async def scheduled_sync():
     """定时同步任务"""
     logger.info("=== 定时同步任务触发 ===")
 
-    if not config.connection_token:
-        logger.warning("未配置 CONNECTION_TOKEN，跳过本次同步")
-        return
-
-    profiles = await profile_db.get_logged_in_profiles()
+    profiles = await profile_db.get_active_profiles()
     if not profiles:
-        logger.warning("没有已登录的 Profile，跳过本次同步")
+        logger.warning("没有启用中的 Profile，跳过本次同步")
         return
 
-    await token_syncer.sync_all_profiles()
+    await token_syncer.sync_all_profiles(source="scheduled")
 
 
 async def startup():
     """启动时初始化"""
     logger.info("=" * 60)
-    logger.info("Flow2API Token Updater v3.0 - 轻量版")
+    logger.info("Flow2API Token Updater v3.2 - 轻量版")
     logger.info("Cookie 导入模式")
     logger.info("=" * 60)
 
     await profile_db.init()
     logger.info("数据库初始化完成")
 
-    await browser_manager.start()
-
     scheduler.add_job(
         scheduled_sync,
         trigger=IntervalTrigger(minutes=config.refresh_interval),
         id=SYNC_JOB_ID,
-        replace_existing=True
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
     )
     scheduler.start()
 
@@ -86,7 +83,7 @@ def main():
         app,
         host="0.0.0.0",
         port=config.api_port,
-        log_level="info"
+        log_level="info",
     )
 
 

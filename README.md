@@ -1,69 +1,285 @@
-﻿# Flow2API Token Updater v3.0
+# Flow2API Token Updater v3.4
 
-轻量版 Token 自动更新工具，通过 Cookie 导入方式管理 Google Labs 登录状态。
+Flow2API Token Updater 是一个轻量级的多账号令牌刷新工具。
+支持两种刷新模式：**协议刷新**（纯 HTTP，无需浏览器）和**浏览器刷新**（Playwright 持久化上下文）。
+优先使用协议刷新，失败时自动回退浏览器模式。
 
-## 特性
+当前版本重点解决三件事：
 
-- 🪶 轻量化：去除 VNC，镜像体积大幅减小
-- 🍪 Cookie 导入：在本地浏览器登录后导出 Cookie
-- 🔄 自动刷新：定时使用 Cookie 刷新 Token
-- 👥 多 Profile：支持管理多个账号
-- 🌐 代理支持：每个 Profile 可配置独立代理
+- 多账号管理
+- 单账号级别的 Flow2API 目标覆盖
+- 协议刷新 + 浏览器自动登录
+- 带图表和近期活动的实时仪表盘（Dashboard）
+
+## 亮点
+
+- **协议刷新**：无需浏览器，纯 HTTP 请求刷新 session token（由 [Hooper](https://github.com/Hooper27) 提供技术方案）
+- 智能回退：协议刷新失败时自动回退到浏览器模式，浏览器刷新失败则清除过期 cookies
+- 浏览器自动登录：支持自动填写账号密码登录（多语言：中/英/日/韩/西/法/德/葡/俄）
+- 运行时轻量：只有在需要登录时才会启动 VNC / Xvfb / noVNC
+- Cookie 导入：支持导入 Google cookies 进行协议登录，或导入 labs.google cookies 恢复会话
+- 自动转化：浏览器登录成功后自动提取 Google cookies，后续同步自动转为协议刷新
+- 智能同步：按最终生效的 Flow2API 地址和令牌分组
+- 单账号覆盖：每个 Profile 都可以覆盖目标地址和连接令牌
+- 代理支持：每个 Profile 都可以使用独立代理
+- 实时仪表盘：优先使用 SSE，失败时自动回退到轮询
+- 图表范围切换：6 小时 / 24 小时 / 72 小时 / 7 天
+- 内置分析：同步活动、失败原因、目标实例分布
+
+## 工作原理
+
+### 刷新策略
+
+1. 每个账号维护一组 Google cookies（`google_cookies` 字段）。
+2. 同步时，如果 `google_cookies` 存在，优先使用**协议刷新**：
+   - 用 curl_cffi 模拟 Chrome TLS 指纹，通过 Google OAuth 流程获取 labs.google session token
+   - 无需启动浏览器，速度快、资源占用低
+3. 协议刷新失败时，自动清除过期 cookies 并回退到**浏览器刷新**：
+   - 启动 Playwright headless 浏览器，从持久化 Profile 中恢复会话
+   - 成功后自动提取新的 Google cookies，下次同步恢复协议刷新
+4. 同步结果分组逻辑：
+   - 按”最终生效目标地址 + 最终生效令牌”分组
+   - 先调用 Flow2API 的 `check-tokens` 接口，只刷新需要刷新的 Profile
+   - 如果目标端检查失败，该分组回退到强制同步
+
+### 登录方式
+
+| 方式 | 说明 | 自动提取 cookies |
+|------|------|------------------|
+| VNC 手动登录 | 通过 noVNC 完成 Google 登录 | 是 |
+| 浏览器自动登录 | 配置账号密码后自动登录 | 是 |
+| 协议 Cookie 导入 | 导入 Google cookies 直接协议登录 | 直接使用 |
+| Labs Cookie 导入 | 导入 labs.google 域名 cookies 恢复会话 | 首次同步时提取 |
 
 ## 快速开始
 
+### 1. 克隆并配置
+
 ```bash
-# 克隆仓库
 git clone https://github.com/genz27/flow2api_tupdater.git
 cd flow2api_tupdater
-
-# 配置环境变量
 cp .env.example .env
-# 编辑 .env 设置 ADMIN_PASSWORD 等
-
-# 启动
-docker compose up -d
-
 ```
 
-访问 http://localhost:8002 进入管理界面。
+至少需要在 `.env` 中设置以下变量：
 
-## 使用流程
+- `ADMIN_PASSWORD`
+- `FLOW2API_URL`
+- `CONNECTION_TOKEN`
 
-1. 创建 Profile
-2. 在本地浏览器登录 https://labs.google
-3. 使用浏览器插件（如 EditThisCookie）导出 Cookie
-4. 在管理界面导入 Cookie
-5. 配置 Flow2API 连接信息
-6. 开始自动同步
+### 2. 启动服务
+
+```bash
+docker compose up -d --build
+```
+
+### 3. 访问应用
+
+- 管理界面（Admin UI）：`http://localhost:8002`
+- noVNC：`http://localhost:6080/vnc.html`
+
+> 只有在启用并实际使用 VNC 登录时，端口 `6080` 才有意义。
+
+## 常见使用流程
+
+### 流程 A：通过 VNC 登录
+
+1. 打开管理界面。
+2. 配置全局默认的 Flow2API 地址和连接令牌。
+3. 创建一个 Profile。
+4. 点击 `Login` 启动浏览器。
+5. 在 noVNC 中完成 Google 登录。
+6. 点击 `Close Browser` 保存当前登录状态。
+7. 手动执行一次同步，确认账号可用。
+8. 后续刷新交给定时任务处理。
+
+### 流程 B：协议 Cookie 导入（推荐）
+
+1. 使用浏览器插件（如 Cookie Editor）导出以下两个域名的 cookies：
+   - `.google.com` 域名下的所有 cookies
+   - `accounts.google.com` 域名下的所有 cookies
+2. 创建一个 Profile。
+3. 点击 `协议登录`，粘贴合并后的 cookies JSON。
+4. 系统自动通过 OAuth 流程获取 session token，后续同步自动走协议刷新。
+
+> 提示：两个域名的 cookies 需要合并为一个 JSON 数组导入。
+
+### 多实例 Flow2API 配置
+
+如果某个账号需要同步到另一套 Flow2API 实例：
+
+1. 打开该 Profile 的编辑对话框。
+2. 设置 `Flow2API URL override`。
+3. 如果目标实例使用不同令牌，再设置 `Connection Token override`。
+4. 保存后，这个 Profile 会优先使用覆盖值。
+
+## 仪表盘
+
+管理仪表盘包含以下内容：
+
+- 概览指标
+- 可切换时间范围的同步活动图表
+- 状态分布和账号排行
+- 失败原因聚合
+- 目标实例分布
+- 近期活动流
+- 实时连接状态
+
+前端默认优先使用 SSE 获取实时更新；
+如果实时流不可用，会自动回退到轻量轮询。
+
+## 持久化
+
+默认的 `docker-compose.yml` 会挂载以下目录：
+
+- `./data` -> `/app/data`
+  - `profiles.db`：账号数据和同步历史
+  - `config.json`：持久化的全局默认配置
+- `./profiles` -> `/app/profiles`
+  - Playwright 持久化浏览器 Profile 数据
+- `./logs` -> `/app/logs`
+  - 运行日志
 
 ## 环境变量
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| ADMIN_PASSWORD | 管理界面密码 | admin123 |
-| API_KEY | 外部 API 密钥 | - |
-| FLOW2API_URL | Flow2API 地址 | http://host.docker.internal:8000 |
-| CONNECTION_TOKEN | Flow2API 连接 Token | - |
-| REFRESH_INTERVAL | 刷新间隔(分钟) | 60 |
+应用当前实际使用的环境变量如下：
 
-## API
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `ADMIN_PASSWORD` | 管理界面密码 | 空 |
+| `API_KEY` | 对外 API 的访问密钥 | 空 |
+| `FLOW2API_URL` | 全局默认 Flow2API 地址 | `http://host.docker.internal:8000` |
+| `CONNECTION_TOKEN` | 全局默认 Flow2API 连接令牌 | 空 |
+| `REFRESH_INTERVAL` | 定时刷新间隔，单位分钟 | `60` |
+| `SESSION_TTL_MINUTES` | 管理端会话 TTL，`0` 表示永不过期 | `1440` |
+| `CONFIG_FILE` | 持久化全局配置文件路径 | `/app/data/config.json` |
+| `API_PORT` | HTTP 监听端口 | `8002` |
+| `ENABLE_VNC` | 是否启用 VNC 登录入口，`1/0` | `1` |
+| `VNC_PASSWORD` | noVNC / x11vnc 密码 | `flow2api` |
 
-### 外部 API (需要 X-API-Key)
+### 配置优先级
 
-- `GET /v1/profiles` - 列出所有 Profile
-- `GET /v1/profiles/{id}/token` - 获取 Token
-- `POST /v1/profiles/{id}/sync` - 同步到 Flow2API
+最终生效目标按以下顺序决定：
 
-## 从 v2.0 升级
+1. Profile 级别的 `flow2api_url`
+2. 全局 `FLOW2API_URL`
 
-v3.0 移除了 VNC 功能，改用 Cookie 导入方式：
+连接令牌按以下顺序决定：
 
-1. 备份 `data/` 目录
-2. 拉取新版本
-3. 重新构建镜像
-4. 为每个 Profile 重新导入 Cookie
+1. Profile 级别的 `connection_token_override`
+2. 全局 `CONNECTION_TOKEN`
 
-## License
+## API 参考
+
+### 管理端 API
+
+以下接口由 Web 仪表盘使用：
+
+- `POST /api/login`
+- `POST /api/logout`
+- `GET /api/auth/check`
+- `GET /api/status`
+- `GET /api/dashboard?hours=6|24|72|168`
+- `GET /api/dashboard/stream?session_token=...`
+- `GET /api/config`
+- `POST /api/config`
+- `GET /api/profiles`
+- `POST /api/profiles`
+- `GET /api/profiles/{id}`
+- `PUT /api/profiles/{id}`
+- `DELETE /api/profiles/{id}`
+- `POST /api/profiles/{id}/launch`
+- `POST /api/profiles/{id}/close`
+- `POST /api/profiles/{id}/check-login`
+- `POST /api/profiles/{id}/import-cookies`
+- `GET /api/profiles/{id}/export-cookies?kind=session|google`（默认导出 `google`）
+- `POST /api/profiles/{id}/extract`
+- `POST /api/profiles/{id}/sync`
+- `POST /api/sync-all`
+
+### 对外 API
+
+以下接口需要在请求头中携带 `X-API-Key`：
+
+- `GET /v1/profiles`
+- `GET /v1/profiles/{id}/token`
+- `POST /v1/profiles/{id}/sync`
+- `GET /health`
+
+## 升级说明
+
+### 升级到 v3.4
+
+v3.4 新增了协议刷新能力：
+
+- 协议登录（Cookie 导入 → OAuth 流程 → session token）
+- 浏览器登录后自动提取 Google cookies，后续转协议刷新
+- 协议刷新失败自动回退浏览器
+- 浏览器自动登录多语言支持（日/韩/西/法/德/葡/俄）
+- `login_method` 字段标识登录方式
+- UI 全面重构
+
+升级步骤：
+
+1. 备份 `data/` 和 `profiles/`。
+2. 拉取最新代码。
+3. 重新构建并重启容器（`docker compose up -d --build`）。
+4. 应用会自动创建新字段（`google_cookies`、`login_method`）。
+5. 已登录的账号下次同步时会自动提取 Google cookies，无需重新登录。
+
+### 升级到 v3.3
+
+v3.3 新增了以下能力：
+
+- Profile 级目标地址覆盖
+- Profile 级连接令牌覆盖
+- 同步历史存储
+- 实时仪表盘和 SSE 流
+- 失败原因聚合
+- 目标实例分布
+- 仪表盘时间范围筛选
+
+建议按以下步骤升级：
+
+1. 备份 `data/` 和 `profiles/`。
+2. 拉取最新代码。
+3. 重新构建并重启容器。
+4. 应用会在需要时自动创建新字段和历史表。
+5. 重新检查管理界面中的全局默认配置。
+6. 如果你使用多套 Flow2API 目标，再检查一次各 Profile 的覆盖配置。
+
+## 故障排查
+
+### 同步提示：Flow2API URL 或令牌不完整
+
+说明最终生效的目标配置不完整。请检查：
+
+- 全局默认目标配置
+- Profile 级地址覆盖
+- Profile 级令牌覆盖
+
+如果某个 Profile 指向另一套 Flow2API 实例，通常也需要为它配置匹配的令牌覆盖。
+
+### 同步提示：提取令牌失败
+
+说明当前保存的浏览器会话已经不可用。可以尝试：
+
+- 通过 VNC 重新登录
+- 导入新的 Cookie
+- 在再次同步前先执行一次 `Check Login`
+
+### noVNC 无法使用
+
+请检查：
+
+- `ENABLE_VNC=1`
+- 端口 `6080` 已正确映射
+- 你确实点击了对应 Profile 的 `Login` 按钮
+
+### 修改了 `API_PORT` 但无法访问应用
+
+如果你修改了应用监听端口，也要同时更新 `docker-compose.yml` 中的端口映射。
+
+## 许可证
 
 MIT

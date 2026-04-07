@@ -52,6 +52,7 @@ class Config(BaseModel):
     flow2api_url: str
     connection_token: str
     refresh_interval: int
+    enable_vnc: bool
     profiles_dir: str = "/app/profiles"
     labs_url: str = "https://labs.google/fx/tools/flow"
     login_url: str = "https://labs.google/fx/api/auth/signin/google"
@@ -73,6 +74,7 @@ def _build_config() -> Config:
     flow2api_url = _get_env("FLOW2API_URL") or persisted.get("flow2api_url") or "http://host.docker.internal:8000"
     connection_token = _get_env("CONNECTION_TOKEN") or persisted.get("connection_token", "")
     refresh_interval = _parse_int(_get_env("REFRESH_INTERVAL") or str(persisted.get("refresh_interval", 60)), 60)
+    enable_vnc = _parse_bool(_get_env("ENABLE_VNC"), default=True)
 
     return Config(
         admin_password=_get_env("ADMIN_PASSWORD") or "",
@@ -80,6 +82,7 @@ def _build_config() -> Config:
         flow2api_url=flow2api_url,
         connection_token=connection_token,
         refresh_interval=refresh_interval,
+        enable_vnc=enable_vnc,
         api_port=_parse_int(_get_env("API_PORT"), 8002),
         session_ttl_minutes=_parse_int(_get_env("SESSION_TTL_MINUTES"), 1440),
         config_file=config_file,
